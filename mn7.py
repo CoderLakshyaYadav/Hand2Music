@@ -41,11 +41,14 @@ def music_generator(coord_queue,frequency):
     sample_rate, duration = 44100, 1.0
     xp = 0
     n=1
-    plenti=None
+    plenti=0  # Changed from None to 0 to prevent TypeError during integer comparison
+    sound = None  # Explicitly initialize sound
     while True:
         # Get the latest finger coordinates
         if not coord_queue.empty():
-            xi, yc, lenti, frame_width, frame_height = coord_queue.get()
+            # Drain the queue to process only the absolute latest frame (fixes latency buildup)
+            while not coord_queue.empty():
+                xi, yc, lenti, frame_width, frame_height = coord_queue.get()
 
             if lenti<30 and lenti>0:
                 if not 100>plenti>30:
@@ -63,17 +66,13 @@ def music_generator(coord_queue,frequency):
             t = np.linspace(0, duration, int(sample_rate * duration), False)
             wave = 32767 * np.sin(2 * np.pi * n * freq_to_play * t)
 
-#            for i in range(2,n+1):
-#                wave += 32767 * np.sin(2 * np.pi * n * freq_to_play * t)
             
             # Convert 1D wave to 2D (stereo)        
             stereo_wave = np.column_stack((wave, wave)).astype(np.int16)
     
             #stop prev sound
-            try:
+            if sound is not None:
                 sound.stop()
-            except UnboundLocalError:
-                pass
 
             # Create sound object and play
             sound = pygame.sndarray.make_sound(stereo_wave)
