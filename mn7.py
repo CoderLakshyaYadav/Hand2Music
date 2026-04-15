@@ -15,17 +15,10 @@ import numpy as np
 import pygame
 import mediapipe as mp
 import multiprocessing as mp_proc
-import threading
-import time
-import ctypes
 
 # ═══════════════════════════════════════════════════════════════════
 #  CONSTANTS
 # ═══════════════════════════════════════════════════════════════════
-SAMPLE_RATE    = 44100
-CHUNK_DURATION = 0.05          # 50ms audio chunks (low latency)
-CHUNK_SAMPLES  = int(SAMPLE_RATE * CHUNK_DURATION)
-
 NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 
 # Pentatonic scale semitone offsets (sounds pleasing, no "wrong" notes)
@@ -38,28 +31,17 @@ COLOR_PINCH_FULL = (50, 255, 50)      # Green   – open hand / playing
 COLOR_PINCH_NEAR = (50, 200, 255)     # Cyan    – near pinch (30-100px)
 COLOR_PINCH_HIT  = (0, 80, 255)       # Red     – full pinch (<30px)
 COLOR_LINE       = (0, 80, 255)
-COLOR_NOTE_BG    = (0, 0, 0)
 FONT             = cv2.FONT_HERSHEY_SIMPLEX
+
 
 # ═══════════════════════════════════════════════════════════════════
 #  MUSIC UTILITIES
 # ═══════════════════════════════════════════════════════════════════
 
-def build_frequency_table(octave_range):
-    """Build a list of frequencies for every note in the given octave range."""
-    freqs = []
-    note_labels = []
-    for octave in octave_range:
-        for pitch in range(12):
-            freq = round(440 * 2 ** ((octave - 4) + (pitch - 9) / 12), 2)
-            freqs.append(freq)
-            note_labels.append(f"{NOTE_NAMES[pitch]}{octave}")
-    return freqs, note_labels
-
-
 def build_pentatonic_table(octave_range):
-    """Return only the pentatonic notes from each octave – sounds nicer."""
-    freqs, labels = [], []
+    """Return only the pentatonic note frequencies from each octave."""
+    freqs = []
+    labels = []
     for octave in octave_range:
         for semitone in PENTATONIC:
             freq = round(440 * 2 ** ((octave - 4) + (semitone - 9) / 12), 2)
@@ -68,38 +50,43 @@ def build_pentatonic_table(octave_range):
     return freqs, labels
 
 
-def harmonic_from_y(frame_height, rows, yc):
-    """Map the Y-position of the hand to a harmonic multiplier (1-5)."""
-    section_height = int(2 * frame_height / 3) // rows
-    row_index = int(yc // section_height) if section_height > 0 else 0
-    harmonic = max(1, rows - row_index)
-    return min(harmonic, rows)
+def harmonic(h, rows, yc):
+    """Map Y position of the hand to a harmonic multiplier (1-5)."""
+    ygrid = []
+    for i in range(0, int(2 * h / 3) + 1, h // rows):
+        ygrid.append(i)
+    if len(ygrid) < 5:
+        return 1
+    if 0 < yc < ygrid[1]:
+        return 5
+    elif ygrid[1] < yc < ygrid[2]:
+        return 4
+    elif ygrid[2] < yc < ygrid[3]:
+        return 3
+    elif ygrid[3] < yc < ygrid[4]:
+        return 2
+    else:
+        return 1
 
 
 # ═══════════════════════════════════════════════════════════════════
 #  DRAWING UTILITIES
 # ═══════════════════════════════════════════════════════════════════
 
-def draw_grid(img, rows, cols, pinch_dist):
+def draw_grid(img, rows, cols, lenti, color=COLOR_GRID, thickness=1):
     """Draw a stylised musical-grid overlay onto the frame."""
     h, w = img.shape[:2]
-    overlay = img.copy()
-
-    # Vertical columns (pitch zones) – always shown
-    col_w = w // max(cols, 1)
-    for j in range(0, w, col_w):
-        cv2.line(overlay, (j, 0), (j, h), COLOR_GRID, 1)
-
-    # Horizontal rows (harmonic zones) – shown when hand is somewhat open
-    if 0 < pinch_dist < 100:
-        row_h = int(2 * h / 3) // rows
+    if lenti > 30 or lenti == 0:
+        col_w = w // max(cols, 1)
+        for j in range(0, w, col_w):
+            cv2.line(img, (j, 0), (j, h), color, thickness)
+    if 0 < lenti < 100:
+        row_h = h // rows
         for i in range(0, int(2 * h / 3) + 1, row_h):
-            cv2.line(overlay, (0, i), (w, i), COLOR_GRID, 1)
-
-    cv2.addWeighted(overlay, 0.4, img, 0.6, 0, img)
+            cv2.line(img, (0, i), (w, i), color, thickness)
 
 
-def draw_hud(img, note_label, harmonic, pinch_dist, is_playing):
+def draw_hud(img, note_label, harmonic_val, pinch_dist, is_playing):
     """Render a heads-up-display with note name, harmonic, and status."""
     h, w = img.shape[:2]
     panel_h = 60
@@ -110,9 +97,9 @@ def draw_hud(img, note_label, harmonic, pinch_dist, is_playing):
     cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
 
     # Note name (big, center)
-    status_color = COLOR_PINCH_HIT if pinch_dist < 30 and pinch_dist > 0 else (
-                   COLOR_PINCH_NEAR if pinch_dist < 100 and pinch_dist > 0 else COLOR_ACCENT)
-    note_text = f"{note_label}  x{harmonic}" if is_playing else "-- rest --"
+    status_color = (COLOR_PINCH_HIT if 0 < pinch_dist < 30 else
+                    COLOR_PINCH_NEAR if 0 < pinch_dist < 100 else COLOR_ACCENT)
+    note_text = f"{note_label}  x{harmonic_val}" if is_playing else "-- rest --"
     (tw, _), _ = cv2.getTextSize(note_text, FONT, 1.0, 2)
     cv2.putText(img, note_text, ((w - tw) // 2, h - 18),
                 FONT, 1.0, status_color, 2, cv2.LINE_AA)
@@ -156,109 +143,77 @@ def draw_hand_visuals(img, index_tip, thumb_tip, midpoint, pinch_dist):
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  AUDIO ENGINE  (phase-continuous; runs in a separate Process)
+#  AUDIO ENGINE  (runs in a separate Process)
 # ═══════════════════════════════════════════════════════════════════
 
-def music_generator(coord_queue, shared_freqs, shared_labels, num_notes):
+def music_generator(coord_queue, frequency):
     """
-    Phase-continuous stereo sine-wave synthesizer.
-
-    Key design choices:
-    • We maintain `phase` across chunks – no wave restarts → no pops.
-    • Frequency glides smoothly (lerp) to the target each chunk.
-    • Amplitude fades in/out based on whether a note is 'active'.
-    • We use a dedicated pygame Channel to avoid sound object juggling.
+    Simple stop-and-play synthesizer (same reliable approach as oldmn7).
+    Stops the previous sound and immediately plays the new one.
     """
-    pygame.mixer.pre_init(frequency=SAMPLE_RATE, size=-16, channels=2, buffer=512)
     pygame.mixer.init()
-    channel = pygame.mixer.Channel(0)
-
-    phase          = 0.0
-    current_freq   = 440.0
-    target_freq    = 440.0
-    amplitude      = 0.0        # 0.0 → 1.0
-    target_amp     = 0.0
-
-    # Local copies from shared memory
-    freqs  = list(shared_freqs[:num_notes])
-    labels = list(shared_labels)
-
-    prev_xi         = 0
-    prev_lenti      = 0.0
-    frame_width     = 640
-    frame_height    = 480
-    harmonic_mult   = 1
-
-    t_chunk = np.arange(CHUNK_SAMPLES) / SAMPLE_RATE   # time axis per chunk
+    sample_rate = 44100
+    duration = 1.0
+    xp = 0
+    n = 1
+    plenti = None
+    sound = None
 
     while True:
-        # ── Pull latest data from queue ──────────────────────────────
-        new_data = None
-        while not coord_queue.empty():
-            try:
-                new_data = coord_queue.get_nowait()
-            except Exception:
-                break
+        if not coord_queue.empty():
+            xi, yc, lenti, frame_width, frame_height = coord_queue.get()
 
-        if new_data is not None:
-            xi, yc, lenti, frame_width, frame_height, note_idx = new_data
-            prev_lenti = lenti
-
-            if 0 < lenti < 30:
-                # Full pinch – hold fixed pitch (X locked)
-                target_freq  = freqs[note_idx]
-                harmonic_mult = harmonic_from_y(frame_height, 6, yc)
-                target_amp   = 0.85
-            elif 30 <= lenti < 100:
-                # Near-pinch zone – play with live X
-                target_freq  = freqs[note_idx]
-                harmonic_mult = harmonic_from_y(frame_height, 6, yc)
-                target_amp   = 0.65
+            if lenti < 30 and lenti > 0:
+                if not (plenti is not None and 30 < plenti < 100):
+                    xi = xp
+                n = harmonic(frame_height, 6, yc)
+            elif 30 < lenti < 100:
+                xi = xp
+                plenti = lenti
             else:
-                # Hand open – silence
-                target_amp  = 0.0
-                harmonic_mult = 1
-        else:
-            # No new data yet; gradually fade if open hand
-            if prev_lenti > 100 or prev_lenti == 0:
-                target_amp = 0.0
+                n = 1
 
-        # ── Smooth frequency glide ─────────────────────────────────--
-        alpha = 0.25                                    # interpolation speed
-        current_freq = current_freq + alpha * (target_freq - current_freq)
-        amplitude    = amplitude    + alpha * (target_amp  - amplitude)
+            freq_idx = min(xi // (frame_width // len(frequency[:])), len(frequency[:]) - 1)
+            freq_idx = max(freq_idx, 0)
+            freq_to_play = frequency[freq_idx]
 
-        eff_freq = current_freq * harmonic_mult
+            # Generate sine wave
+            t = np.linspace(0, duration, int(sample_rate * duration), False)
+            wave = 32767 * np.sin(2 * np.pi * n * freq_to_play * t)
 
-        # ── Generate phase-continuous chunk ──────────────────────────
-        phases = 2 * np.pi * eff_freq * t_chunk + phase
-        wave   = (amplitude * 32767 * np.sin(phases)).astype(np.int16)
+            # Convert 1D wave to 2D (stereo)
+            stereo_wave = np.column_stack((wave, wave)).astype(np.int16)
 
-        # Advance phase to avoid discontinuity at chunk boundary
-        phase = (phase + 2 * np.pi * eff_freq * CHUNK_DURATION) % (2 * np.pi)
+            # Stop previous sound
+            if sound is not None:
+                try:
+                    sound.stop()
+                except Exception:
+                    pass
 
-        # ── Play chunk ───────────────────────────────────────────────
-        stereo = np.column_stack((wave, wave))
-        sound  = pygame.sndarray.make_sound(stereo)
+            # Create sound object and play
+            sound = pygame.sndarray.make_sound(stereo_wave)
+            sound.play()
 
-        # Queue sound so playback is seamless
-        if not channel.get_busy():
-            channel.play(sound)
-        else:
-            channel.queue(sound)
-
-        # Sleep just under chunk duration to keep queue primed
-        time.sleep(CHUNK_DURATION * 0.8)
+            xp = xi
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  CAMERA + HAND TRACKING  (main video process)
+#  CAMERA + HAND TRACKING
 # ═══════════════════════════════════════════════════════════════════
 
-def camera_input(coord_queue, shared_freqs, shared_labels, num_notes):
+def camera_input(coord_queue, frequency):
     """Capture webcam, detect hand, and send coordinates to the audio process."""
+    num_notes = len(frequency[:])
+    # Build labels for display (pentatonic over octaves 3-5)
+    labels, _ = [], []
+    octave_range = range(3, 6)
+    for octave in octave_range:
+        for semitone in PENTATONIC:
+            labels.append(f"{NOTE_NAMES[semitone]}{octave}")
+
     mp_hands = mp.solutions.hands
-    hands    = mp_hands.Hands(
+    hands = mp_hands.Hands(
         max_num_hands=1,
         min_detection_confidence=0.7,
         min_tracking_confidence=0.8
@@ -267,10 +222,6 @@ def camera_input(coord_queue, shared_freqs, shared_labels, num_notes):
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-    freqs  = list(shared_freqs[:num_notes])
-    labels = list(shared_labels)
-
-    prev_note_idx = 0
     lenti = 0.0
 
     while cap.isOpened():
@@ -282,8 +233,9 @@ def camera_input(coord_queue, shared_freqs, shared_labels, num_notes):
         lenti = 0.0
         is_playing = False
         note_label = "--"
-        harmonic   = 1
-        note_idx   = prev_note_idx
+        harmonic_val = 1
+        xi = yi = xt = yt = 0
+        xc = yc = 0.0
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = hands.process(rgb)
@@ -293,31 +245,25 @@ def camera_input(coord_queue, shared_freqs, shared_labels, num_notes):
                 lm = hand_lm.landmark
 
                 # Index fingertip (8) and thumb tip (4)
-                ix = int(lm[8].x * frame_w)
-                iy = int(lm[8].y * frame_h)
-                tx = int(lm[4].x * frame_w)
-                ty = int(lm[4].y * frame_h)
+                xi = int(lm[8].x * frame_w)
+                yi = int(lm[8].y * frame_h)
+                xt = int(lm[4].x * frame_w)
+                yt = int(lm[4].y * frame_h)
 
-                midpoint = ((ix + tx) / 2, (iy + ty) / 2)
-                lenti    = float(np.hypot(abs(ix - tx), abs(iy - ty)))
+                xc, yc = (xi + xt) / 2, (yi + yt) / 2
+                lenti = float(np.hypot(abs(xi - xt), abs(yi - yt)))
 
-                # Map mirrored X → note index
-                # Flip x because we mirror the frame for display
-                mirrored_ix = frame_w - ix
-                note_idx = min(
-                    int(mirrored_ix / frame_w * num_notes),
-                    num_notes - 1
-                )
-                note_idx   = max(note_idx, 0)
-                prev_note_idx = note_idx
+                # Map X → note index (using raw xi, same as oldmn7)
+                note_idx = min(xi // (frame_w // num_notes), num_notes - 1)
+                note_idx = max(note_idx, 0)
                 note_label = labels[note_idx]
-                harmonic   = harmonic_from_y(frame_h, 6, midpoint[1])
-                is_playing = lenti < 100 and lenti > 0
+                harmonic_val = harmonic(frame_h, 6, yc)
+                is_playing = 0 < lenti < 100
 
-                coord_queue.put((ix, midpoint[1], lenti, frame_w, frame_h, note_idx))
+                coord_queue.put((xi, yc, lenti, frame_w, frame_h))
 
                 # Draw enhanced hand visuals
-                draw_hand_visuals(frame, (ix, iy), (tx, ty), midpoint, lenti)
+                draw_hand_visuals(frame, (xi, yi), (xt, yt), (xc, yc), lenti)
 
                 # MediaPipe skeleton
                 mp.solutions.drawing_utils.draw_landmarks(
@@ -331,7 +277,7 @@ def camera_input(coord_queue, shared_freqs, shared_labels, num_notes):
 
         # Overlays
         draw_grid(display, 6, num_notes, lenti)
-        draw_hud(display, note_label, harmonic, lenti, is_playing)
+        draw_hud(display, note_label, harmonic_val, lenti, is_playing)
 
         cv2.imshow('Hand2Music 🎵', display)
         if cv2.waitKey(1) & 0xFF == 27:   # ESC to quit
@@ -346,28 +292,25 @@ def camera_input(coord_queue, shared_freqs, shared_labels, num_notes):
 # ═══════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
-    mp_proc.set_start_method('spawn', force=True)
-
-    # ── Build note table ────────────────────────────────────────────
-    octave_range = range(3, 6)                  # C3 → B5 (3 octaves)
-    freqs, labels = build_pentatonic_table(octave_range)   # Pentatonic = nice
+    # Build pentatonic note table (C3 → B5, 3 octaves)
+    octave_range = range(3, 6)
+    freqs, labels = build_pentatonic_table(octave_range)
     num_notes = len(freqs)
 
-    # Shared memory arrays
-    shared_freqs  = mp_proc.Array('d', freqs)
-    shared_labels = mp_proc.Array(ctypes.c_char_p, [l.encode() for l in labels])
+    # Shared memory frequency array (same as oldmn7 pattern)
+    shared_freqs = mp_proc.Array('d', freqs)
 
-    coord_queue = mp_proc.Queue(maxsize=10)
+    coord_queue = mp_proc.Queue()
 
-    # ── Spawn processes ─────────────────────────────────────────────
-    p_music  = mp_proc.Process(
+    # Spawn processes
+    p_music = mp_proc.Process(
         target=music_generator,
-        args=(coord_queue, shared_freqs, shared_labels, num_notes),
+        args=(coord_queue, shared_freqs),
         daemon=True
     )
     p_camera = mp_proc.Process(
         target=camera_input,
-        args=(coord_queue, shared_freqs, shared_labels, num_notes)
+        args=(coord_queue, shared_freqs)
     )
 
     print("🎵  Hand2Music starting…")
