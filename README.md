@@ -81,6 +81,6 @@ You should see a webcam window. Use the gestures above to play sound.
 
 ## Credits
 
-- `hrshvs`
+- `hrshvs`: Repository Owner 
 - `CoderLakshyaYadav`: added smooth audio synthesis, pentatonic scale, enhanced UI
 ---
