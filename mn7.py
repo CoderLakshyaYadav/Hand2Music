@@ -146,14 +146,56 @@ def draw_hand_visuals(img, index_tip, thumb_tip, midpoint, pinch_dist):
 #  AUDIO ENGINE  (runs in a separate Process)
 # ═══════════════════════════════════════════════════════════════════
 
+def make_wave(freq, harmonic_mult, sample_rate=44100, duration=0.6):
+    """
+    Additive synthesis: mix fundamental + overtones for a warm, instrument-like tone.
+    Applies an ADSR envelope to eliminate click/pop artifacts at note boundaries.
+    """
+    t = np.linspace(0, duration, int(sample_rate * duration), False)
+    f = freq * harmonic_mult
+
+    # Additive synthesis – decreasing amplitudes per harmonic (like a plucked string)
+    wave  = 0.55 * np.sin(2 * np.pi * 1 * f * t)   # fundamental
+    wave += 0.22 * np.sin(2 * np.pi * 2 * f * t)   # 2nd harmonic
+    wave += 0.12 * np.sin(2 * np.pi * 3 * f * t)   # 3rd harmonic
+    wave += 0.06 * np.sin(2 * np.pi * 4 * f * t)   # 4th harmonic
+    wave += 0.03 * np.sin(2 * np.pi * 5 * f * t)   # 5th harmonic
+
+    # ADSR envelope – attack/decay/sustain/release to avoid clicks
+    n_samples   = len(t)
+    attack_s    = int(0.015 * sample_rate)   # 15 ms  attack
+    decay_s     = int(0.040 * sample_rate)   # 40 ms  decay  (→ sustain level)
+    release_s   = int(0.060 * sample_rate)   # 60 ms  release at end
+    sustain_lvl = 0.80                        # 80 % amplitude during sustain
+
+    envelope = np.ones(n_samples)
+    # Attack: 0 → 1
+    envelope[:attack_s] = np.linspace(0.0, 1.0, attack_s)
+    # Decay: 1 → sustain_lvl
+    envelope[attack_s:attack_s + decay_s] = np.linspace(1.0, sustain_lvl, decay_s)
+    # Sustain: stays at sustain_lvl (already 1.0 array, multiply below)
+    envelope[attack_s + decay_s:-release_s] = sustain_lvl
+    # Release: sustain_lvl → 0
+    envelope[-release_s:] = np.linspace(sustain_lvl, 0.0, release_s)
+
+    wave = wave * envelope
+    # Normalise and scale to int16 range
+    peak = np.max(np.abs(wave))
+    if peak > 0:
+        wave = wave / peak
+    wave = (wave * 32767 * 0.88).astype(np.int16)
+    return wave
+
+
 def music_generator(coord_queue, frequency):
     """
-    Simple stop-and-play synthesizer (same reliable approach as oldmn7).
-    Stops the previous sound and immediately plays the new one.
+    Stop-and-play synthesizer with rich additive synthesis and ADSR envelope.
+    Eliminates harsh clicks and produces a warm, theremin-like tone.
     """
+    # Lower buffer size = less latency; pre_init before any pygame import
+    pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=512)
     pygame.mixer.init()
-    sample_rate = 44100
-    duration = 1.0
+
     xp = 0
     n = 1
     plenti = None
@@ -177,21 +219,19 @@ def music_generator(coord_queue, frequency):
             freq_idx = max(freq_idx, 0)
             freq_to_play = frequency[freq_idx]
 
-            # Generate sine wave
-            t = np.linspace(0, duration, int(sample_rate * duration), False)
-            wave = 32767 * np.sin(2 * np.pi * n * freq_to_play * t)
+            # Rich waveform with harmonics + smooth envelope
+            wave = make_wave(freq_to_play, n)
 
-            # Convert 1D wave to 2D (stereo)
-            stereo_wave = np.column_stack((wave, wave)).astype(np.int16)
+            # Convert to stereo
+            stereo_wave = np.column_stack((wave, wave))
 
-            # Stop previous sound
+            # Stop previous sound cleanly
             if sound is not None:
                 try:
                     sound.stop()
                 except Exception:
                     pass
 
-            # Create sound object and play
             sound = pygame.sndarray.make_sound(stereo_wave)
             sound.play()
 
